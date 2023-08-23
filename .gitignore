@@ -1,0 +1,14 @@
+*.swp
+.mypy_cache
+venv*
+*.out
+__pycache__
+.env
+*.html
+*.txt
+*.log
+*.conf
+logs/
+*.csv
+ed_processing_logic.py
+*.png
