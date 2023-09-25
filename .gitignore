@@ -10,5 +10,4 @@ __pycache__
 *.conf
 logs/
 *.csv
-ed_processing_logic.py
 *.png

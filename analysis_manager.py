@@ -17,7 +17,9 @@ import argparse
 #Import project files
 from experiment_meta import ExperimentMeta
 from ed_metric_calculations import EDMetricCalculations
-from pc_metric_calculations import PCMetricCalculations
+import ic_calculations
+from plot_container import PlotContainer
+from file_to_string import ftos
 
 #Class with functionality that covers database queries, data processing and plotting graphs
 class AnalysisManager(object):
@@ -162,20 +164,23 @@ class AnalysisManager(object):
 			# Sort experiments in chronological order
 			self.Experiments = self.MergeSort(self.Experiments)
 
+
 	@staticmethod
 	def StringToUNIXTime(ip: str) -> float:
 		dt: datetime = datetime.strptime(ip, "%Y-%m-%d %H:%M:%S")
 		op: float = time.mktime(dt.timetuple())
-		#Need to correct for timezone because Vaisala and EasyLog cannot make software
-		#op -= 3600.0
+		#I don't think that Vaisala nor EasyLog account for timezone, so this will probably break once we go back to GMT lmao
 		return op
 
 	def ProcessData(self) -> None:
 		self.rawDataAll: pd.DataFrame = pd.DataFrame()
+		self.rawDataICAll: pd.DataFrame = pd.DataFrame()
 		for exp in self.Experiments:
 			#Create DataFrame with data for a single experiment
 			rawDataCO2: pd.DataFrame = pd.read_csv(exp.CO2LogfileURL, header=8, names=["timestamp", "co2_ppm"])
 			rawDataVoltage: pd.DataFrame = pd.read_csv(exp.voltageLogfileURL, header=2, names=["data_index", "timestamp", "voltage_v", "high_alarm", "low_alarm"])
+			if exp.icLogfileURL:
+				rawDataIC: pd.DataFrame = pd.read_csv(exp.icLogfileURL, header=0, names=["time_min", "amine_area", "k+_area", "amine_ppm", "amine_mol/kg", "amine_mol"])
 
 			#Create new columns with time since start of experiment in seconds
 			rawDataCO2["runtime_s"] = rawDataCO2["timestamp"].apply(self.StringToUNIXTime)
@@ -189,149 +194,178 @@ class AnalysisManager(object):
 			rawDataVoltage = rawDataVoltage[rawDataVoltage["runtime_s"] >= 0.0]
 			rawDataVoltage = rawDataVoltage[rawDataVoltage["runtime_s"] <= exp.stopTime - exp.startTime]
 
+			#Reset indices so that the dataframes are correctly 0-indexed:
+			rawDataCO2.reset_index(drop=True, inplace=True)
+			rawDataVoltage.reset_index(drop=True, inplace=True)
+
 			#Drop unneeded columns
 			rawDataCO2.drop("timestamp", axis=1, inplace=True)
 			rawDataVoltage.drop(["data_index", "timestamp", "high_alarm", "low_alarm"], axis=1, inplace=True)
+			if exp.icLogfileURL:
+				#rawDataIC.drop(["amine_area", "k+_area", "amine_ppm", "amine_mol/kg"], axis=1, inplace=True)
+				rawDataIC.drop(["amine_area", "k+_area", "amine_ppm"], axis=1, inplace=True)
+				rawDataIC["amine_mol/kg"] = rawDataIC["amine_mol/kg"].apply(lambda x: x if x >= 0.0 else 0.0)
+				rawDataIC["amine_mol"] = rawDataIC["amine_mol"].apply(lambda x: x if x >= 0.0 else 0.0)
+
+			#Discard outliers using a rolling average
+			rollWindowSize: int = 5
+			thresholdTolerance: float = 0.15
+			#CO2 data
+			co2ppmSeries: pd.Series = rawDataCO2["co2_ppm"]
+			co2ppmSeriesRoll: pd.Series = co2ppmSeries.rolling(rollWindowSize).median()
+
+			'''
+			for n in range(rollWindowSize,co2ppmSeries.size):
+				if co2ppmSeries.iloc[n] > co2ppmSeriesRoll.iloc[n] * (1.0 + thresholdTolerance) or co2ppmSeries.iloc[n] < co2ppmSeriesRoll.iloc[n] * (1.0 - thresholdTolerance):
+					rawDataCO2.drop(n, axis=0, inplace=True)
+			'''
+
+			roll: list[float] = []
+			nextToReplace: int = 0
+			for n in range(0, rollWindowSize):
+				roll.append(co2ppmSeries[n])
+
+			for n in range(rollWindowSize, co2ppmSeries.size):
+				'''
+				rollingMean: float = 0
+				for x in range(0, rollWindowSize):
+					rollingMean += roll[x]
+				rollingMean /= rollWindowSize
+				'''
+
+				sortedRoll: list[float] = self.MergeSort(roll)
+				rollingMedian: float = sortedRoll[(int)(rollWindowSize / 2.0)]
+
+				if co2ppmSeries.iloc[n] > rollingMedian * (1.0 + thresholdTolerance) or co2ppmSeries.iloc[n] < rollingMedian * (1.0 - thresholdTolerance):
+					rawDataCO2.drop(n, axis=0, inplace=True)
+				else:
+					roll[nextToReplace % rollWindowSize] = co2ppmSeries.iloc[n]
+					nextToReplace += 1
+
+			#Drop outliers for voltage data
+			if exp.current > 0.0:
+				voltageSeries: pd.Series = rawDataVoltage["voltage_v"]
+				startIndex: int = 0
+				nextToReplace = 0
+				
+				while voltageSeries[startIndex] <= 0.01:
+					rawDataVoltage.drop(startIndex, axis=0, inplace=True)
+					startIndex += 1
+
+				for n in range(startIndex, startIndex + rollWindowSize):
+					roll[nextToReplace] = voltageSeries[n]
+					nextToReplace += 1
+
+				for n in range(startIndex + rollWindowSize, voltageSeries.size):
+					sortedRoll: list[float] = self.MergeSort(roll)
+					rollingMedian: float = sortedRoll[(int)(rollWindowSize / 2.0)]
+
+					if voltageSeries.iloc[n] > rollingMedian * (1.0 + thresholdTolerance) or voltageSeries.iloc[n] < rollingMedian * (1.0 - thresholdTolerance):
+						rawDataVoltage.drop(n, axis=0, inplace=True)
+					else:
+						roll[nextToReplace % rollWindowSize] = voltageSeries.iloc[n]
+						nextToReplace += 1
+
+
+			rawDataCO2.reset_index(drop=True, inplace=True)
+			rawDataVoltage.reset_index(drop=True, inplace=True)
 
 			#Merge dataframes into one
 			rawDataExp: pd.DataFrame = pd.concat([rawDataCO2, rawDataVoltage], axis=0, ignore_index=True)
 
 			#Add experiment ID labels to graph
 			rawDataExp["label"] = exp.label
+			if exp.icLogfileURL:
+				rawDataIC["label"] = exp.label
 
-			#Finally, append all raw data to dataframe with class scope
+			#Finally, append all raw data to dataframe with class scope for plotting later
 			self.rawDataAll = pd.concat([self.rawDataAll, rawDataExp], axis=0, ignore_index=True)
+			if exp.icLogfileURL:
+				self.rawDataICAll = pd.concat([self.rawDataICAll, rawDataIC], axis=0, ignore_index=True)
+
+
+			#Now we start processing the data
+			kpm = EDMetricCalculations(rawDataExp, exp)
+
+			stackResistanceTuple: Tuple[float, float] = (0.0, 0.0)
+			currentEfficiencyTuple: Tuple[float, float] = (0.0, 0.0)
+			powerConsumptionTuple: Tuple[float, float] = (0.0, 0.0)
+			fluxCO2Tuple: Tuple[float, float] = (0.0, 0.0)
+
+			if exp.current > 0.0:
+				try:
+					stackResistanceTuple = kpm.GetStackResistance()
+				except Exception as e:
+					print (e, file=sys.stderr)
+
+				try:
+					currentEfficiencyTuple = kpm.GetCurrentEfficiency()
+				except Exception as e:
+					print (e, file=sys.stderr)
+
+				try:
+					powerConsumptionTuple = kpm.GetPowerConsumption()
+				except Exception as e:
+					print (e, file=sys.stderr)
+
+			try:
+				fluxCO2Tuple = kpm.GetCO2Flux()
+			except Exception as e:
+				print (e, file=sys.stderr)
 			
-			'''
-			#Logic to remove outliers from the ED data (for instance when current/air pump shuts off during sampling)
+			exp.processedData["stackResistance"].append(stackResistanceTuple[0])
+			exp.processedData["stackResistanceError"].append(stackResistanceTuple[1])
 
-			#First we're gonna lock in the initial timestamp
-			initialTimestamp: float = EDMetricCalculations.ToUNIXTime(rawDataED["_time"][0])
-			# Then we discard the first 30 minutes of data
-			rawDataED = rawDataED.drop(list(range(0, 180))).reset_index()
-
-			# Next we delete the data immediately after sampling while the system is re-equilibrating
-			# Setup some constants for the loop
-			currentSeries: pd.Series = rawDataED["current_PSU001"]
-			#airFlowSeries: pd.Series = rawDataED["volumetric_flow_MFM001"]
-			deletionIndices: List[int] = []
-			thresholdCurrent: float = 0.9
-			thresholdAirFlow: float = 2.5
-			belowThreshold: bool = False
-			#belowAirFlowThreshold: bool = False
-			secondsToDelete: int = 300 #This is kinda overkill. Maybe better to do a second pass of the deletion loop, but with volumetric flowrate. Obviously much more computationally expensive but will give better data
-			dataPointsToDelete: int = (int)(secondsToDelete/10)
-
-			# Get the indices where the current returns to normal
-			for n in range(0, currentSeries.size):
-				if belowThreshold:
-					if currentSeries[n] > thresholdCurrent:
-						deletionIndices.append(n)
-						belowThreshold = False
-				else:
-					if currentSeries[n] <= thresholdCurrent:
-						belowThreshold = True
-
-			#print (deletionIndices)
-			# Now we delete the indices and the next minute worth of data
-			for index in deletionIndices:
-				rawDataED.drop(list(range(index, index + dataPointsToDelete)), inplace=True)
+			exp.processedData["currentEfficiency"].append(currentEfficiencyTuple[0])
+			exp.processedData["currentEfficiencyError"].append(currentEfficiencyTuple[1])
 			
-			rawDataED.reset_index(drop=True, inplace=True)
+			exp.processedData["powerConsumption"].append(powerConsumptionTuple[0])
+			exp.processedData["powerConsumptionError"].append(powerConsumptionTuple[1])
+			
+			exp.processedData["fluxCO2"].append(fluxCO2Tuple[0])
+			exp.processedData["fluxCO2Error"].append(fluxCO2Tuple[1])
 
+			#Now process the amine crossing data:
+			if exp.icLogfileURL:
+				crossingRate: float = ic_calculations.LinearRegression(rawDataIC["time_min"], rawDataIC["amine_mol"])[0]
+				exp.processedData["amineFlux"].append(ic_calculations.CrossingFlux(crossingRate, exp.amine))
+			else:
+				exp.processedData["amineFlux"].append(0.0)
 
-			# Now we delete the data points with 0 current and air flow
-			rawDataED = rawDataED[rawDataED["current_PSU001"] > thresholdCurrent]
-			rawDataED = rawDataED[rawDataED["volumetric_flow_MFM001"] > thresholdAirFlow]
+			currentProcessedDataIndex: int = len(exp.processedData["amineFlux"]) - 1
+			exp.processedData["aminePerCO2"].append(exp.processedData["amineFlux"][currentProcessedDataIndex] / exp.processedData["fluxCO2"][currentProcessedDataIndex])
+			
+			#I don't like doing this, but plotly needs it
+			exp.processedData["label"].append(exp.label)
 
-			# For the purposes of smoothing, we're only gonna process a few data points at a time:
-			edLowerBound: int = 0
-			pcLowerBound: int = 0
-			rowCountPC: int = rawDataPC.shape[0]
-			rowCountED: int = rawDataED.shape[0]
+			#Now we loop through and get some metrics with a higher time resolution
+			if exp.icLogfileURL and exp.current > 0.0:
+				timeWindow: int = 900
+				windowDuration: int = 300
+				while timeWindow + (windowDuration / 2) < rawDataExp["runtime_s"].iloc[rawDataExp["runtime_s"].size - 1]:
+					dataFrameWindow: pd.DataFrame = rawDataExp[rawDataExp["runtime_s"] > timeWindow - (windowDuration / 2)]
+					dataFrameWindow= dataFrameWindow[dataFrameWindow["runtime_s"] < timeWindow + (windowDuration / 2)]
+					if dataFrameWindow["co2_ppm"].dropna().size > 0 and dataFrameWindow["voltage_v"].dropna().size > 0:
+						trm: EDMetricCalculations = EDMetricCalculations(dataFrameWindow, exp)
+						
+						trPowerConsumptionTuple: Tuple[float, float] = (0.0, 0.0)
+						try:
+							trPowerConsumptionTuple = trm.GetPowerConsumption()
+						except Exception as e:
+							print (e, file=sys.stderr)
 
-			while edLowerBound < rowCountED:
-				edUpperBound: int = edLowerBound + 100
-				pcUpperBound: int = pcLowerBound + 100
+						releaseAmineConcTuple: Tuple[float, float] = ic_calculations.LinearRegression(rawDataIC["time_min"], rawDataIC["amine_mol/kg"])
+						releaseAmineConc: float = releaseAmineConcTuple[0] * (float(timeWindow) / 60.0) + releaseAmineConcTuple[1]
 
-				if edUpperBound > rowCountED:
-					edUpperBound = rowCountED
+						if releaseAmineConc >= 0.0:
+							exp.timeResolvedData["time_min"].append((float(timeWindow) / 60.0))
+							exp.timeResolvedData["powerConsumption"].append(trPowerConsumptionTuple[0])
+							exp.timeResolvedData["powerConsumptionError"].append(trPowerConsumptionTuple[1])
+							exp.timeResolvedData["label"].append(exp.label)
+							exp.timeResolvedData["releaseAmineConc"].append(releaseAmineConc)
 
-				if pcUpperBound > rowCountPC:
-					pcUpperBound = rowCountPC
-				
-				dataSlice: pd.DataFrame = rawDataED.iloc[edLowerBound : edUpperBound]
-				pcDataSlice: pd.DataFrame = rawDataPC.iloc[pcLowerBound: pcUpperBound]
+					timeWindow += windowDuration
 
-				edLowerBound = edUpperBound
-				pcLowerBound = pcUpperBound
-
-				#Get "inputs"
-				metrics: EDMetricCalculations = EDMetricCalculations(dataSlice)
-
-				exp.processedData["time"].append(((metrics.GetAverageUNIXTimestamp()) - initialTimestamp) / 3600)
-				exp.processedData["releasepH"].append(dataSlice["pH_PH001"].mean())
-				exp.processedData["capturepHED"].append(dataSlice["pH_PH002"].mean())
-
-				#Get "outputs"
-
-				#Get current efficiency
-				currentEfficiencyTuple: Tuple[float, float] = metrics.GetCurrentEfficiency()
-
-				#Ensure calculation was successful
-				if math.isnan(currentEfficiencyTuple[0]) or math.isnan(currentEfficiencyTuple[1]):
-					print ("Warning: error in calculating current efficiency for experiment labelled:\n\t\"%s\"" % (exp.label), file=sys.stderr)
-					currentEfficiencyTuple = (0.0, 0.0)
-				
-				exp.processedData["currentEfficiency"].append(currentEfficiencyTuple[0])
-				exp.processedData["currentEfficiencyError"].append(currentEfficiencyTuple[1])
-				
-				#Get power consumption
-				powerConsumptionTuple: Tuple[float, float] = metrics.GetPowerConsumption()
-				
-				#Ensure calculation was successful
-				if math.isnan(powerConsumptionTuple[0]) or math.isnan(powerConsumptionTuple[1]):
-					print ("Warning: error in calculating power consumption for experiment labelled:\n\t\"%s\"" % (exp.label), file=sys.stderr)
-					powerConsumptionTuple = (0.0, 0.0)
-				
-				exp.processedData["powerConsumption"].append(powerConsumptionTuple[0])
-				exp.processedData["powerConsumptionError"].append(powerConsumptionTuple[1])
-				
-				#Get CO2 flux
-				fluxCO2Tuple: Tuple[float, float] = metrics.GetCO2Flux()
-				
-				#Ensure calculation was successful
-				if math.isnan(fluxCO2Tuple[0]) or math.isnan(fluxCO2Tuple[1]):
-					print ("Warning: error in calculating CO2 flux for experiment labelled:\n\t\"%s\"" % (exp.label), file=sys.stderr)
-					fluxCO2Tuple = (0.0, 0.0)
-				
-				exp.processedData["fluxCO2"].append(fluxCO2Tuple[0])
-				exp.processedData["fluxCO2Error"].append(fluxCO2Tuple[1])
-				
-				#I don't like doing this, but plotly needs it
-				exp.processedData["label"].append(exp.label)
-
-				#Now it's time for the PC data
-				pcMetrics: PCMetricCalculations = PCMetricCalculations(pcDataSlice, exp.contactingArea, exp.airFlowVelocity)
-
-				exp.processedData["capturepHPC"].append(pcDataSlice["pH_PH001"].mean())
-
-
-				captureFluxTuple: Tuple[float, float] = pcMetrics.GetCO2Flux()
-
-				#Ensure calculation was successful
-				if math.isnan(captureFluxTuple[0]) or math.isnan(captureFluxTuple[1]):
-					print ("Warning: error in calculating capture flux for experiment labelled:\n\t\"%s\"" % (exp.label), file=sys.stderr)
-					captureFluxTuple = (0.0, 0.0)
-				
-				exp.processedData["captureFlux"].append(captureFluxTuple[0])
-				exp.processedData["captureFluxError"].append(captureFluxTuple[1])
-
-				if "MPA" in exp.label:
-					if exp.processedData["time"][-1] > 2.5 and exp.processedData["time"][-1] < 3.5:
-						#exp.processedData["captureFlux"][-1] = exp.processedData["captureFlux"][-1] * (0.4/1.3)
-						exp.processedData["captureFlux"][-1] = np.nan
-				'''
 
 
 	def PlotData(self) -> None:
@@ -340,45 +374,188 @@ class AnalysisManager(object):
 			raise Exception("Error: No valid experiments found")
 
 		#Combine all processed data into 1 dataframe:
-		'''
 		allProcessedData: pd.DataFrame = pd.DataFrame()
+		allTimeResolvedData: pd.DataFrame = pd.DataFrame()
 		for exp in self.Experiments:
 			allProcessedData = pd.concat([allProcessedData, pd.DataFrame(exp.processedData)], ignore_index=True)
-		'''
+			allTimeResolvedData = pd.concat([allTimeResolvedData, pd.DataFrame(exp.timeResolvedData)], ignore_index=True)
 
 
 		#Make list of plots:
-		plots: List[px.plot] = []
+		plots: List[PlotContainer] = []
 
 		#Actual plotting code:
-		plots.append(px.line(self.rawDataAll,
+		currentPlot: PlotContainer = PlotContainer()
+
+		currentPlot.plot = px.line(self.rawDataAll,
 			x="runtime_s",
 			y="voltage_v",
 			color="label"
-		))
-
-		plots[0].update_layout(
-			#title="Stack resistance",
-			#legend_title="Capture solvent",
-			xaxis_title="Time / s",
-			yaxis_title="Voltage / V"
 		)
+		currentPlot.plot.update_layout(
+			title=dict(text="Voltage vs time", font=dict(size=18)),
+			legend_title="Capture solvent",
+			xaxis_title=dict(text="Time / s", font=dict(size=18)),
+			yaxis_title=dict(text="Voltage / V", font=dict(size=18))
+		)
+		currentPlot.input = "time"
+		currentPlot.output = "voltage"
+		plots.append(currentPlot)
+		currentPlot = PlotContainer()
 
-		plots.append(px.line(self.rawDataAll,
+		currentPlot.plot = px.line(
+			self.rawDataAll,
 			x="runtime_s",
 			y="co2_ppm",
 			color="label"
-		))
-
-		plots[1].update_layout(
-			xaxis_title="Time / s",
-			yaxis_title="[CO<sub>2</sub>] / ppm"
 		)
+		currentPlot.plot.update_layout(
+			title=dict(text="Release flux vs time", font=dict(size=18)),
+			xaxis_title=dict(text="Time / s", font=dict(size=18)),
+			yaxis_title=dict(text="[CO<sub>2</sub>] / ppm", font=dict(size=18)),
+			legend_title="Capture solvent"
+		)
+		currentPlot.input = "time"
+		currentPlot.output = "co2Delta"
+		plots.append(currentPlot)
+		currentPlot = PlotContainer()
 
+		currentPlot.plot = px.line(
+			self.rawDataICAll,
+			x="time_min",
+			y="amine_mol",
+			color="label"
+		)
+		currentPlot.plot.update_layout(
+			title=dict(text="Total amine crossover vs time", font=dict(size=18)),
+			xaxis_title=dict(text="Time / min", font=dict(size=18)),
+			yaxis_title=dict(text="Total amine crossover / mol", font=dict(size=18)),
+			legend_title="Capture solvent"
+		)
+		currentPlot.input = "time"
+		currentPlot.output = "amineCrossed"
+		plots.append(currentPlot)
+		currentPlot = PlotContainer()
+
+		currentPlot.plot = px.bar(
+			allProcessedData,
+			x="label",
+			y="stackResistance",
+			error_y="stackResistanceError"
+		)
+		currentPlot.plot.update_layout(
+			title=dict(text="Average stack resistance", font=dict(size=18)),
+			yaxis_title=dict(text="Stack resistance / Ω", font=dict(size=18)),
+			xaxis_title=""
+		)
+		currentPlot.input = "experimentalAverage"
+		currentPlot.output = "stackResistance"
+		plots.append(currentPlot)
+		currentPlot = PlotContainer()
+
+		currentPlot.plot = px.bar(
+			allProcessedData,
+			x="label",
+			y="currentEfficiency",
+			error_y="currentEfficiencyError"
+		)
+		currentPlot.plot.update_layout(
+			title=dict(text="Average current efficiency", font=dict(size=18)),
+			yaxis_title=dict(text="Current efficiency / %", font=dict(size=18)),
+			xaxis_title=""
+		)
+		currentPlot.input = "experimentalAverage"
+		currentPlot.output = "currentEfficiency"
+		plots.append(currentPlot)
+		currentPlot = PlotContainer()
+
+		currentPlot.plot = px.bar(
+			allProcessedData,
+			x="label",
+			y="powerConsumption",
+			error_y="powerConsumptionError"
+		)
+		currentPlot.plot.update_layout(
+			title=dict(text="Average power consumption", font=dict(size=18)),
+			yaxis_title=dict(text="Power consumption / kWh t<sup>-1</sup> CO<sub>2</sub>", font=dict(size=18)),
+			xaxis_title=""
+		)
+		currentPlot.input = "experimentalAverage"
+		currentPlot.output = "powerConsumption"
+		plots.append(currentPlot)
+		currentPlot = PlotContainer()
+
+		currentPlot.plot = px.bar(
+			allProcessedData,
+			x="label",
+			y="fluxCO2",
+			error_y="fluxCO2Error"
+		)
+		currentPlot.plot.update_layout(
+			title=dict(text="Average CO<sub>2</sub> flux", font=dict(size=18)),
+			yaxis_title=dict(text="CO<sub>2</sub> flux / mg m<sup>-2</sup> s<sup>-1</sup>", font=dict(size=18)),
+			xaxis_title=""
+		)
+		currentPlot.input = "experimentalAverage"
+		currentPlot.output = "releaseFlux"
+		plots.append(currentPlot)
+		currentPlot = PlotContainer()
+
+		currentPlot.plot = px.bar(
+			allProcessedData,
+			x="label",
+			y="amineFlux"
+		)
+		currentPlot.plot.update_layout(
+			title=dict(text="Amine crossover flux", font=dict(size=18)),
+			yaxis_title=dict(text="Amine crossover flux / mg m<sup>-2</sup> s<sup>-1</sup>", font=dict(size=18)),
+			xaxis_title=""
+		)
+		currentPlot.input = "experimentalAverage"
+		currentPlot.output = "amineFlux"
+		plots.append(currentPlot)
+		currentPlot = PlotContainer()
+
+		allProcessedData["aminePerCO2"] = allProcessedData["aminePerCO2"].apply(lambda x : x * 1000)
+		currentPlot.plot = px.bar(
+			allProcessedData,
+			x="label",
+			y="aminePerCO2"
+		)
+		currentPlot.plot.update_layout(
+			title=dict(text="Amine crossing vs CO<sub>2</sub> captured", font=dict(size=18)),
+			yaxis_title=dict(text="Amine crossover per CO2 captured / kg ton<sup>-1</sup>", font=dict(size=18)),
+			xaxis_title=""
+		)
+		currentPlot.input = "experimentalAverage"
+		currentPlot.output = "aminePerCO2"
+		plots.append(currentPlot)
+		currentPlot = PlotContainer()
+
+		currentPlot.plot = px.line(
+			allTimeResolvedData,
+			x="releaseAmineConc",
+			y="powerConsumption",
+			error_y="powerConsumptionError",
+			color="label"
+		)
+		currentPlot.plot.update_layout(
+			title=dict(text="Power consumption vs release amine concentration", font=dict(size=18)),
+			xaxis_title=dict(text="Release amine concentration / mol kg<sup>-1</sup>", font=dict(size=18)),
+			yaxis_title=dict(text="Power consumption / kWh t<sup>-1</sup> CO<sub>2</sub>", font=dict(size=18)),
+			legend_title="Amine"
+		)
+		currentPlot.input = "releaseAmineConc"
+		currentPlot.output = "powerConsumption"
+		plots.append(currentPlot)
 		
 		#plots[9].update_traces(connectgaps=True)
 		#plots[10].update_traces(connectgaps=True)
 
+#		pio.write_image(plots[5], "../images/png/powerConsumption.png", engine="kaleido")
+#		pio.write_image(plots[7], "../images/png/amineFlux.png", engine="kaleido")
+#		pio.write_image(plots[8], "../images/png/aminePerCO2.png", engine="kaleido")
+#		pio.write_image(plots[9], "../images/png/power_vs_releaseAmine.png", engine="kaleido")
 #		pio.write_image(plots[10], "./captureFlux_vs_capturepH.png", engine="kaleido", scale=2)
 #		pio.write_image(plots[0], "./currentEfficiency_vs_time.png", engine="kaleido", scale=2)
 #		pio.write_image(plots[1], "./currentEfficiency_vs_capturepH.png", engine="kaleido", scale=2)
@@ -387,26 +564,61 @@ class AnalysisManager(object):
 #
 		#Add plots to HTML doc:
 		with open(self.outputFilename, 'w', encoding="utf-8") as Writer:
-			Writer.write("""\
+			Writer.write(f"""\
 <!DOCTYPE html>
 <html>
 <head>
-	<title>ED results</title>
+	<title>microED results</title>
 	<style>
-		.graph-column{
-			width: 45%;
-			float: left;
-			padding: 5px 12px 0px 0px;
-		}
+		{ftos("graphsheet.css")}
 	</style>
+	<script>
+		{ftos("filter.js")}
+	</script>
 </head>
-<body>
+<body onload="PageLoadInit()">
+	<div class="filter-row">
+		<div class="filter-list" style="margin: 0% -25% 0% 0%;">
+			<p class="filter-title">Filter by input</p>
+			<input type="checkbox" class="input" value="input-time" checked="true"/>
+			<label>Time</label><br>
+			<input type="checkbox" class="input" value="input-experimentalAverage" checked="true"/>
+			<label>Experimental average</label><br>
+			<input type="checkbox" class="input" value="input-releaseAmineConc" checked="true"/>
+			<label>Release amine concentration</label><br>
+			<button onclick="TickAll('input', true)">Select all</button><br>
+			<button onclick="TickAll('input', false)">Deselect all</button><br>
+		</div>
+		<div class="filter-list">
+			<p class="filter-title">Filter by output</p>
+			<input type="checkbox" class="output" value="output-voltage" checked="true"/>
+			<label>Voltage</label><br>
+			<input type="checkbox" class="output" value="output-co2Delta" checked="true"/>
+			<label>CO<sub>2</sub> delta</label><br>
+			<input type="checkbox" class="output" value="output-powerConsumption" checked="true"/>
+			<label>Power Consumption</label><br>
+			<input type="checkbox" class="output" value="output-currentEfficiency" checked="true"/>
+			<label>Current Efficiency</label><br>
+			<input type="checkbox" class="output" value="output-releaseFlux" checked="true"/>
+			<label>Release flux</label><br>
+			<input type="checkbox" class="output" value="output-amineFlux" checked="true"/>
+			<label>Amine crossing flux</label><br>
+			<input type="checkbox" class="output" value="output-aminePerCO2" checked="true"/>
+			<label>Amine crossed per unit CO2</label><br>
+			<input type="checkbox" class="output" value="output-amineCrossed" checked="true"/>
+			<label>Total amine crossed</label><br>
+			<input type="checkbox" class="output" value="output-stackResistance" checked="true"/>
+			<label>Stack resistance</label><br>
+			<button onclick="TickAll('output', true)">Select all</button><br>
+			<button onclick="TickAll('output', false)">Deselect all</button><br>
+		</div>
+	</div>
 	<div class=\"graph-row\">\n"""
 		)
 			
 			for n in range(0, len(plots)):
-				Writer.write("<div class=\"graph-column\">\n")
-				Writer.write(plots[n].to_html(full_html=False))
+				Writer.write(f"<div class=\"graph-column input-{plots[n].input} output-{plots[n].output}\">\n")
+				Writer.write(plots[n].plot.to_html(full_html=False))
 				Writer.write("</div>")
 				if n % 2 == 1:
 					Writer.write("\t</div>\n")

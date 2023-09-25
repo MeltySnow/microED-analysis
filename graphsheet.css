@@ -1,0 +1,10 @@
+.graph-column{
+	width: 45%;
+	float: left;
+	padding: 5px 12px 0px 0px;
+}
+.filter-list{
+	width: 45%;
+	float: left;
+	padding: 8px 8px 0px 0px;
+}

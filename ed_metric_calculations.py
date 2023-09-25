@@ -5,20 +5,23 @@ import sys
 import math
 import datetime
 import time
+from experiment_meta import ExperimentMeta
 
 #Class that is initialised using a slice of a DataFrame and calculates key performance metrics
 class EDMetricCalculations(object):
-	def __init__(self, inputDataWindow: pd.DataFrame) -> None:
+	def __init__(self, inputDataWindow: pd.DataFrame, exp: ExperimentMeta) -> None:
 		#Define constants used in calculations
-		self.MEMBRANE_AREA: float = 0.0036 #m^2
+		self.MEMBRANE_AREA: float = 0.0006 #m^2
 		self.FARADAY_CONSTANT: float = 96485.0 #C mol^{-1}
 		self.CO2_DENSITY: float = 1.815 #g dm^{-3}
 		self.MEMBRANE_PAIRS: float = 10.0 #dimensionless
 		self.CO2_MOLAR_MASS: float = 44.01 #g mol^{-1}
 		self.BICARBONATE_CHARGE: float = 1.0 #dimensionless
 
-		#Make input DataFrame available to all member functions
+		#Make inputs DataFrame available to all member functions
 		self.dataWindow: pd.DataFrame = inputDataWindow
+		self.currentSetpoint = exp.current #A
+		self.airFlowRate = exp.airFlowRate / 60.0 #converted to L s^{-1}
 
 		#Load some derived values that are often reused across key metric calculations
 		self.totalMolesCO2: Tuple[float, float] = self.GetMolesCO2()
@@ -82,15 +85,13 @@ class EDMetricCalculations(object):
 ############################################
 
 	def GetMolesCO2(self) -> Tuple[float, float]:
+		relevantData: pd.DataFrame = self.dataWindow.dropna(subset="co2_ppm", ignore_index=True)
+		timeSeries: pd.Series = relevantData["runtime_s"]
 		#Convert CO2 ppm into fraction of CO2
-		co2FractionSeries: pd.Series = self.dataWindow["CO2_PPM_CO2001"].apply(lambda x: x / 1000000.0)
-		#Convert air volumetric flow from litres/minute to litres/second
-		airVolumetricFlowSeries: pd.Series = self.dataWindow["volumetric_flow_MFM001"].apply(lambda x: x / 60.0)
-		#Convert timestamp from some ugly string to UNIX timestamp
-		timeSeries: pd.Series = self.dataWindow["_time"].apply(self.ToUNIXTime)
+		co2FractionSeries: pd.Series = relevantData["co2_ppm"].apply(lambda x: (x - 400) / 1000000.0)
 
 		#Combine CO2 fraction and air volumetric flow series to get CO2 volume
-		co2VolumeSeries: pd.Series = co2FractionSeries.multiply(airVolumetricFlowSeries, fill_value=0.0)
+		co2VolumeSeries: pd.Series = co2FractionSeries.apply(lambda x: x * self.airFlowRate)
 
 		#Get error of CO2 volume
 		co2VolumeError: float = co2VolumeSeries.std()
@@ -108,31 +109,12 @@ class EDMetricCalculations(object):
 #DEFINE PUBLIC, NON-STATIC MEMBER FUNCTIONS
 ###########################################
 
-	#Returns a tuple. 0th element is actual current density, 1st is categorical current density needed for bar plotting
-	def GetCurrentDensity(self) -> Tuple[float, int]:
-		#Parses current densities into well-defined categories to group bars together
-		currentDensities: List[float] = [120.0, 200.0, 280.0, 360.0, 440.0, 520.0]
-
-		#Calculate ACTUAL current density
-		#Extract current from dataframe:
-		actualCurrentDensity: float = self.dataWindow["current_PSU001"].mean() / self.MEMBRANE_AREA
-
-		#Now we see which category the actual value is closest to
-		outputIndex: int = 0
-		for n in range(1, len(currentDensities)):
-			diff: float = abs(currentDensities[n] - actualCurrentDensity)
-			best: float = abs(currentDensities[outputIndex] - actualCurrentDensity)
-			if diff < best:
-				outputIndex = n
-		return (actualCurrentDensity, int(currentDensities[outputIndex]))
-
-
 #In the following functions, numbers are stored as tuples of format (data, error)
 
 	def GetStackResistance(self) -> Tuple[float, float]:
 		#Extract values and errors from dataframe:
-		current: Tuple[float, float] = (self.dataWindow["current_PSU001"].mean(), self.dataWindow["current_PSU001"].std())
-		voltage: Tuple[float, float] = (self.dataWindow["voltage_PSU001"].mean(), self.dataWindow["voltage_PSU001"].std())
+		current: Tuple[float, float] = (self.currentSetpoint, 0.0)
+		voltage: Tuple[float, float] = (self.dataWindow["voltage_v"].mean(), self.dataWindow["voltage_v"].std())
 
 		#Perform arithmetic
 		resistance = self.ErrorDivide(voltage, current)
@@ -140,14 +122,11 @@ class EDMetricCalculations(object):
 
 	def GetCurrentEfficiency(self) -> Tuple[float, float]:
 		#Extract values and errors from dataframe:
-		currentSeries: pd.Series = self.dataWindow["current_PSU001"]
-		timeSeries: pd.Series = self.dataWindow["_time"].apply(self.ToUNIXTime)
+		runtime: float = self.dataWindow["runtime_s"].iloc[self.dataWindow.shape[0] - 1]
 
 		#Begin arithmetic
-		currentEfficiency: Tuple[float, float] = (0.0, 0.0)
-
 		#Work out total number of mol of electrons passed:
-		molElectrons: Tuple[float, float] = self.Integrate(timeSeries, currentSeries) #Gives total coulombs passed
+		molElectrons: Tuple[float, float] = (runtime * self.currentSetpoint, 0.0) #Gives total coulombs passed
 		molElectrons = self.ErrorDivide(molElectrons, (self.FARADAY_CONSTANT, 0.0))
 
 		#Work out mol of CO2 per mol of e-
@@ -161,13 +140,12 @@ class EDMetricCalculations(object):
 
 
 	def GetPowerConsumption(self) -> Tuple[float, float]:
+		relevantData: pd.DataFrame = self.dataWindow.dropna(subset="voltage_v", ignore_index=True)
 		#Extract values and errors from dataframe:
-		powerSeries: pd.Series = self.dataWindow["current_PSU001"].multiply(self.dataWindow["voltage_PSU001"])
-		timeSeries: pd.Series = self.dataWindow["_time"].apply(self.ToUNIXTime)
+		powerSeries: pd.Series = relevantData["voltage_v"].dropna().apply(lambda x: x * self.currentSetpoint)
+		timeSeries: pd.Series = relevantData["runtime_s"]
 
 		#Begin arithmetic
-		powerConsumption: Tuple[float, float] = (0.0, 0.0)
-
 		#Work out total energy in J
 		totalEnergy: Tuple[float, float] = self.Integrate(timeSeries, powerSeries)
 
@@ -188,12 +166,9 @@ class EDMetricCalculations(object):
 
 	def GetCO2Flux(self) -> Tuple[float, float]:
 		#Get duration of relevant data window in s
-		timeSeries: pd.Series = self.dataWindow["_time"].apply(self.ToUNIXTime)
-		duration: float = timeSeries.iloc[timeSeries.size - 1] - timeSeries.iloc[0]
+		duration: float = self.dataWindow["runtime_s"].iloc[self.dataWindow.shape[0] - 1]
 
 		#Begin arithmetic
-		fluxCO2: Tuple[float, float] = (0.0, 0.0)
-
 		#Work out total mass of CO2 evolved in g
 		massCO2: Tuple[float, float] = self.ErrorMultiply(self.totalMolesCO2, (self.CO2_MOLAR_MASS, 0.0))
 		#Convert mass to mg
@@ -209,13 +184,6 @@ class EDMetricCalculations(object):
 		fluxCO2 = self.ErrorDivide(rateCO2, totalArea)
 
 		return fluxCO2
-
-	def GetCapturepHRange(self) -> Tuple[float, float]:
-		pHSeries: pd.Series = self.dataWindow["pH_PH002"]
-		lastIndex: int = pHSeries.size - 1
-		op: str = "%f -> %f" % (pHSeries.iloc[0], pHSeries.iloc[lastIndex])
-		#return (pHSeries[0], pHSeries[lastIndex])
-		return op
 
 	def GetAverageUNIXTimestamp(self) -> float:
 		timeSeries: pd.Series = self.dataWindow["_time"].apply(self.ToUNIXTime)
