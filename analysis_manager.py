@@ -1,5 +1,5 @@
 #Import pip packages
-from typing import Type, List
+from typing import Type, List, Tuple
 import requests, json
 import numpy as np
 import pandas as pd
@@ -7,11 +7,11 @@ import os
 import time
 import math
 from datetime import datetime, timedelta
-import notion_df
+import notion_df # type: ignore
 import sys
 from dotenv import load_dotenv
-import plotly.express as px
-import plotly.io as pio
+import plotly.express as px # type: ignore
+import plotly.io as pio # type: ignore
 import argparse
 
 #Import project files
@@ -214,25 +214,12 @@ class AnalysisManager(object):
 			co2ppmSeries: pd.Series = rawDataCO2["co2_ppm"]
 			co2ppmSeriesRoll: pd.Series = co2ppmSeries.rolling(rollWindowSize).median()
 
-			'''
-			for n in range(rollWindowSize,co2ppmSeries.size):
-				if co2ppmSeries.iloc[n] > co2ppmSeriesRoll.iloc[n] * (1.0 + thresholdTolerance) or co2ppmSeries.iloc[n] < co2ppmSeriesRoll.iloc[n] * (1.0 - thresholdTolerance):
-					rawDataCO2.drop(n, axis=0, inplace=True)
-			'''
-
 			roll: list[float] = []
 			nextToReplace: int = 0
 			for n in range(0, rollWindowSize):
 				roll.append(co2ppmSeries[n])
 
 			for n in range(rollWindowSize, co2ppmSeries.size):
-				'''
-				rollingMean: float = 0
-				for x in range(0, rollWindowSize):
-					rollingMean += roll[x]
-				rollingMean /= rollWindowSize
-				'''
-
 				sortedRoll: list[float] = self.MergeSort(roll)
 				rollingMedian: float = sortedRoll[(int)(rollWindowSize / 2.0)]
 
@@ -257,8 +244,8 @@ class AnalysisManager(object):
 					nextToReplace += 1
 
 				for n in range(startIndex + rollWindowSize, voltageSeries.size):
-					sortedRoll: list[float] = self.MergeSort(roll)
-					rollingMedian: float = sortedRoll[(int)(rollWindowSize / 2.0)]
+					sortedRoll = self.MergeSort(roll)
+					rollingMedian = sortedRoll[(int)(rollWindowSize / 2.0)]
 
 					if voltageSeries.iloc[n] > rollingMedian * (1.0 + thresholdTolerance) or voltageSeries.iloc[n] < rollingMedian * (1.0 - thresholdTolerance):
 						rawDataVoltage.drop(n, axis=0, inplace=True)
@@ -410,13 +397,13 @@ class AnalysisManager(object):
 			color="label"
 		)
 		currentPlot.plot.update_layout(
-			title=dict(text="Release flux vs time", font=dict(size=18)),
+			title=dict(text="Release CO<sub>2</sub> concentration vs time", font=dict(size=18)),
 			xaxis_title=dict(text="Time / s", font=dict(size=18)),
 			yaxis_title=dict(text="[CO<sub>2</sub>] / ppm", font=dict(size=18)),
 			legend_title="Capture solvent"
 		)
 		currentPlot.input = "time"
-		currentPlot.output = "co2Delta"
+		currentPlot.output = "co2ppm"
 		plots.append(currentPlot)
 		currentPlot = PlotContainer()
 
@@ -493,7 +480,7 @@ class AnalysisManager(object):
 		)
 		currentPlot.plot.update_layout(
 			title=dict(text="Average CO<sub>2</sub> flux", font=dict(size=18)),
-			yaxis_title=dict(text="CO<sub>2</sub> flux / mg m<sup>-2</sup> s<sup>-1</sup>", font=dict(size=18)),
+			yaxis_title=dict(text="Release flux / mg m<sup>-2</sup> s<sup>-1</sup>", font=dict(size=18)),
 			xaxis_title=""
 		)
 		currentPlot.input = "experimentalAverage"
@@ -549,19 +536,6 @@ class AnalysisManager(object):
 		currentPlot.output = "powerConsumption"
 		plots.append(currentPlot)
 		
-		#plots[9].update_traces(connectgaps=True)
-		#plots[10].update_traces(connectgaps=True)
-
-#		pio.write_image(plots[5], "../images/png/powerConsumption.png", engine="kaleido")
-#		pio.write_image(plots[7], "../images/png/amineFlux.png", engine="kaleido")
-#		pio.write_image(plots[8], "../images/png/aminePerCO2.png", engine="kaleido")
-#		pio.write_image(plots[9], "../images/png/power_vs_releaseAmine.png", engine="kaleido")
-#		pio.write_image(plots[10], "./captureFlux_vs_capturepH.png", engine="kaleido", scale=2)
-#		pio.write_image(plots[0], "./currentEfficiency_vs_time.png", engine="kaleido", scale=2)
-#		pio.write_image(plots[1], "./currentEfficiency_vs_capturepH.png", engine="kaleido", scale=2)
-#		pio.write_image(plots[2], "./currentEfficiency_vs_releasepH.png", engine="kaleido", scale=2)
-#		pio.write_image(plots[5], "./powerConsumption_vs_releasepH.png", engine="kaleido", scale=2)
-#
 		#Add plots to HTML doc:
 		with open(self.outputFilename, 'w', encoding="utf-8") as Writer:
 			Writer.write(f"""\
@@ -593,8 +567,8 @@ class AnalysisManager(object):
 			<p class="filter-title">Filter by output</p>
 			<input type="checkbox" class="output" value="output-voltage" checked="true"/>
 			<label>Voltage</label><br>
-			<input type="checkbox" class="output" value="output-co2Delta" checked="true"/>
-			<label>CO<sub>2</sub> delta</label><br>
+			<input type="checkbox" class="output" value="output-co2ppm" checked="true"/>
+			<label>CO<sub>2</sub> ppm</label><br>
 			<input type="checkbox" class="output" value="output-powerConsumption" checked="true"/>
 			<label>Power Consumption</label><br>
 			<input type="checkbox" class="output" value="output-currentEfficiency" checked="true"/>

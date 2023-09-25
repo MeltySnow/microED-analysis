@@ -21,8 +21,8 @@ class ExperimentMeta(object):
 		self.label: str = notionDashboard.loc["Label"]
 		#self.label = notionDashboard.loc["Experiment ID"]
 		#self.label: str = f'{notionDashboard.loc["Amine concentration / mol kg^{-1}"]}m {notionDashboard.loc["Amine"]}, {notionDashboard.loc["Current density / A m^{-2}"]} A / m2, Initial pH = {notionDashboard.loc["Capture pH initial"]}'
-		startDatetimeString: datetime = notionDashboard.loc["Start time"].to_pydatetime()
-		stopDatetimeString: datetime = notionDashboard.loc["End time"].to_pydatetime()
+		startDatetimeString: datetime.datetime = notionDashboard.loc["Start time"].to_pydatetime()
+		stopDatetimeString: datetime.datetime = notionDashboard.loc["End time"].to_pydatetime()
 		self.current: float = notionDashboard.loc["Current / A"]
 		self.airFlowRate: float = notionDashboard.loc["Air flow rate"]
 		self.amine: str = notionDashboard.loc["Amine"]
@@ -35,10 +35,9 @@ class ExperimentMeta(object):
 			raise Exception("WARNING: No Voltage logfile found for experiment: %s" % self.label)
 		self.voltageLogfileURL: str = notionDashboard.loc["Voltage logfile"][0]
 
-		if len(notionDashboard.loc["IC data"]) < 1:
-			self.icLogfileURL: str = ""
-		else:
-			self.icLogfileURL: str = notionDashboard.loc["IC data"][0]
+		self.icLogfileURL: str = ""
+		if len(notionDashboard.loc["IC data"]) >= 1:
+			self.icLogfileURL = notionDashboard.loc["IC data"][0]
 
 		# Convert times to UNIX epoch time (needed for InfluxDB query)
 		self.startTime: float = self.ToUNIXTime(startDatetimeString)
@@ -70,26 +69,26 @@ class ExperimentMeta(object):
 		}
 
 	@staticmethod
-	def ToUNIXTime(ip: datetime) -> float:
+	def ToUNIXTime(ip: datetime.datetime) -> float:
 		return time.mktime(ip.timetuple())
 
 	# Comparison operator overloads for sorting experiments into chronolocical order
-	def __gt__(self, other):
+	def __gt__(self, other) -> bool:
 		if self.startTime > other.startTime:
 			return True
 		return False
 
-	def __lt__(self, other):
+	def __lt__(self, other) -> bool:
 		if self.startTime < other.startTime:
 			return True
 		return False
 
-	def __ge__(self, other):
+	def __ge__(self, other) -> bool:
 		if self.startTime >= other.startTime:
 			return True
 		return False
 
-	def __le__(self, other):
+	def __le__(self, other) -> bool:
 		if self.startTime <= other.startTime:
 			return True
 		return False

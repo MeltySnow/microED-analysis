@@ -47,7 +47,7 @@ class EDMetricCalculations(object):
 
 	#Converts a datetime-type string to a float representing its UNIX timestamp in seconds
 	@staticmethod
-	def ToUNIXTime(dateString: datetime) -> float:
+	def ToUNIXTime(dateString: datetime.datetime) -> float:
 		return time.mktime(dateString.timetuple())
 
 	#Integrates series y wrt series x by drawing trapezia between each set of data points and adding their areas
@@ -85,7 +85,7 @@ class EDMetricCalculations(object):
 ############################################
 
 	def GetMolesCO2(self) -> Tuple[float, float]:
-		relevantData: pd.DataFrame = self.dataWindow.dropna(subset="co2_ppm", ignore_index=True)
+		relevantData: pd.DataFrame = self.dataWindow.dropna(subset=["co2_ppm"], ignore_index=True)
 		timeSeries: pd.Series = relevantData["runtime_s"]
 		#Convert CO2 ppm into fraction of CO2
 		co2FractionSeries: pd.Series = relevantData["co2_ppm"].apply(lambda x: (x - 400) / 1000000.0)
@@ -140,7 +140,7 @@ class EDMetricCalculations(object):
 
 
 	def GetPowerConsumption(self) -> Tuple[float, float]:
-		relevantData: pd.DataFrame = self.dataWindow.dropna(subset="voltage_v", ignore_index=True)
+		relevantData: pd.DataFrame = self.dataWindow.dropna(subset=["voltage_v"], ignore_index=True)
 		#Extract values and errors from dataframe:
 		powerSeries: pd.Series = relevantData["voltage_v"].dropna().apply(lambda x: x * self.currentSetpoint)
 		timeSeries: pd.Series = relevantData["runtime_s"]
