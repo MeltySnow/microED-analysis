@@ -1,5 +1,5 @@
 #Import pip packages
-from typing import Type, List
+from typing import Type, List, Tuple
 import requests, json
 import numpy as np
 import pandas as pd
@@ -7,11 +7,11 @@ import os
 import time
 import math
 from datetime import datetime, timedelta
-import notion_df
+import notion_df # type: ignore
 import sys
 from dotenv import load_dotenv
-import plotly.express as px
-import plotly.io as pio
+import plotly.express as px # type: ignore
+import plotly.io as pio # type: ignore
 import argparse
 
 #Import project files
@@ -214,25 +214,12 @@ class AnalysisManager(object):
 			co2ppmSeries: pd.Series = rawDataCO2["co2_ppm"]
 			co2ppmSeriesRoll: pd.Series = co2ppmSeries.rolling(rollWindowSize).median()
 
-			'''
-			for n in range(rollWindowSize,co2ppmSeries.size):
-				if co2ppmSeries.iloc[n] > co2ppmSeriesRoll.iloc[n] * (1.0 + thresholdTolerance) or co2ppmSeries.iloc[n] < co2ppmSeriesRoll.iloc[n] * (1.0 - thresholdTolerance):
-					rawDataCO2.drop(n, axis=0, inplace=True)
-			'''
-
 			roll: list[float] = []
 			nextToReplace: int = 0
 			for n in range(0, rollWindowSize):
 				roll.append(co2ppmSeries[n])
 
 			for n in range(rollWindowSize, co2ppmSeries.size):
-				'''
-				rollingMean: float = 0
-				for x in range(0, rollWindowSize):
-					rollingMean += roll[x]
-				rollingMean /= rollWindowSize
-				'''
-
 				sortedRoll: list[float] = self.MergeSort(roll)
 				rollingMedian: float = sortedRoll[(int)(rollWindowSize / 2.0)]
 
@@ -257,8 +244,8 @@ class AnalysisManager(object):
 					nextToReplace += 1
 
 				for n in range(startIndex + rollWindowSize, voltageSeries.size):
-					sortedRoll: list[float] = self.MergeSort(roll)
-					rollingMedian: float = sortedRoll[(int)(rollWindowSize / 2.0)]
+					sortedRoll = self.MergeSort(roll)
+					rollingMedian = sortedRoll[(int)(rollWindowSize / 2.0)]
 
 					if voltageSeries.iloc[n] > rollingMedian * (1.0 + thresholdTolerance) or voltageSeries.iloc[n] < rollingMedian * (1.0 - thresholdTolerance):
 						rawDataVoltage.drop(n, axis=0, inplace=True)

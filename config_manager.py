@@ -1,3 +1,5 @@
+import io
+
 def ConfigGen() -> None:
 	with open(".conf", 'w', encoding="utf-8") as Writer:
 		Writer.write("""\
@@ -27,7 +29,7 @@ def FirstColonIndex(ip: str) -> int:
 def LoadConfig(config: dict) -> None:
 	#I THINK Python dictionaries get passed by reference so I should be able to modify it within this function
 	#Open config file in read mode
-	Reader: _io.TextIOWrapper = open(config["config"], "r", encoding="utf=8")
+	Reader: io.TextIOWrapper = open(config["config"], "r", encoding="utf=8")
 
 	#Initialise constants for loop:
 	line: str = Reader.readline()
